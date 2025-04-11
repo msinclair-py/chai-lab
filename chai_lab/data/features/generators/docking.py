@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import intel_extension_for_pytorch
 from einops import rearrange, repeat
 from torch import Tensor
 

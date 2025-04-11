@@ -4,6 +4,7 @@
 
 import antipickle
 import torch
+import intel_extension_for_pytorch
 
 
 class TorchAntipickleAdapter(antipickle.AbstractAdapter):

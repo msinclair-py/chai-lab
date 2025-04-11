@@ -10,6 +10,7 @@ from pathlib import Path
 import gemmi
 import modelcif
 import torch
+import intel_extension_for_pytorch
 from einops import rearrange
 from ihm import (
     DNAChemComp,

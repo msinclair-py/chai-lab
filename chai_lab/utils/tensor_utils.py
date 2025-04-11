@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import TypeVar
 
 import torch
+import intel_extension_for_pytorch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
@@ -30,7 +31,7 @@ def cdist(
 
     flat_size = torch.prod(torch.tensor(x.shape[:-2])) * n * m
 
-    if x.is_cuda and flat_size > _threshold:
+    if flat_size > _threshold: #x.is_cuda and 
         # Torch cdist without mm fails when the total number of
         # points is > _threshold (in dimension 3)
         # or 8192 points for batch size 32.

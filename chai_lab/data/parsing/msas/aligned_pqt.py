@@ -14,6 +14,7 @@ from typing import Literal, Mapping, Optional
 import pandas as pd
 import pandera as pa
 import torch
+import intel_extension_for_pytorch
 from einops import repeat
 from pandera.typing import Series
 

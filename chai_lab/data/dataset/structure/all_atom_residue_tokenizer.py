@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from itertools import chain
 
 import torch
+import intel_extension_for_pytorch
 from einops import repeat
 from torch import Tensor
 
@@ -387,7 +388,9 @@ class AllAtomResidueTokenizer:
             for residue in entity_data.residues
         ]
 
-        valid_residues = [x for x in tokenized_residues if x is not None]
+        valid_residues: list[TokenSpan] = [
+            x for x in tokenized_residues if x is not None
+        ]
         if len(valid_residues) == 0:
             logger.warning(
                 f"Got no residues for entity {entity_data.entity_id} with residues {entity_data.residues}"

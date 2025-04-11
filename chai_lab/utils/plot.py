@@ -11,6 +11,7 @@ import torch
 from einops import reduce
 from matplotlib import pyplot as plt
 from torch import Tensor
+import intel_extension_for_pytorch
 
 from chai_lab.data import residue_constants as rc
 from chai_lab.utils.typing import Int, UInt8, typecheck

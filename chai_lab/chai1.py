@@ -3,13 +3,18 @@
 # See the LICENSE file for details.
 
 
+import itertools
+import logging
 import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-import os
+from typing import Sequence
+
 import numpy as np
 import torch
+
+import intel_extension_for_pytorch
 import torch.export
 from einops import einsum, rearrange, repeat
 from torch import Tensor
@@ -32,13 +37,19 @@ from chai_lab.data.dataset.inference_dataset import load_chains_from_raw, read_i
 from chai_lab.data.dataset.msas.colabfold import generate_colabfold_msas
 from chai_lab.data.dataset.msas.load import get_msa_contexts
 from chai_lab.data.dataset.msas.msa_context import MSAContext
+from chai_lab.data.dataset.msas.utils import (
+    subsample_and_reorder_msa_feats_n_mask,
+)
 from chai_lab.data.dataset.structure.all_atom_structure_context import (
     AllAtomStructureContext,
 )
 from chai_lab.data.dataset.structure.bond_utils import (
     get_atom_covalent_bond_pairs_from_constraints,
 )
-from chai_lab.data.dataset.templates.context import TemplateContext
+from chai_lab.data.dataset.templates.context import (
+    TemplateContext,
+    get_template_context,
+)
 from chai_lab.data.features.feature_factory import FeatureFactory
 from chai_lab.data.features.feature_type import FeatureType
 from chai_lab.data.features.generators.atom_element import AtomElementOneHot
@@ -98,11 +109,6 @@ from chai_lab.utils.plot import plot_msa
 from chai_lab.utils.tensor_utils import move_data_to_device, set_seed, und_self
 from chai_lab.utils.typing import Float, typecheck
 
-import chai_lab.data.dataset.templates.fns.protein as protein
-import chai_lab.data.dataset.templates.fns.feats as feats
-import chai_lab.data.dataset.templates.fns.rigid_utils as rigid_utils
-import chai_lab.data.dataset.templates.fns.residue_constants as rc
-import chai_lab.data.dataset.templates.fns.atom37_backbone as atom37_backbone
 
 class UnsupportedInputError(RuntimeError):
     pass
@@ -117,11 +123,13 @@ class ModuleWrapper:
         crop_size: int,
         *,
         return_on_cpu=False,
-        move_to_device: torch.device | None = None,
+        move_to_device: torch.device | None = 'xpu',
         **kw,
     ):
+        move_to_device = 'xpu'
         f = getattr(self.jit_module, f"forward_{crop_size}")
         if move_to_device is not None:
+            print(move_to_device)
             result = f(**move_data_to_device(kw, device=move_to_device))
         else:
             result = f(**kw)
@@ -133,15 +141,16 @@ class ModuleWrapper:
 
 
 def load_exported(comp_key: str, device: torch.device) -> ModuleWrapper:
+    device = torch.device("xpu:0")
     torch.jit.set_fusion_strategy([("STATIC", 0), ("DYNAMIC", 0)])
     local_path = chai1_component(comp_key)
     assert isinstance(device, torch.device)
-    if device != torch.device("cuda:0"):
+    if device != torch.device("xpu:0"):
         # load on cpu first, then move to device
         return ModuleWrapper(torch.jit.load(local_path, map_location="cpu").to(device))
     else:
         # skip loading on CPU.
-        return ModuleWrapper(torch.jit.load(local_path).to(device))
+        return ModuleWrapper(torch.jit.load(local_path, map_location = "cpu").to('xpu:0'))
 
 
 # %%
@@ -300,21 +309,43 @@ class StructureCandidates:
             plddt=self.plddt[idx],
         )
 
+    @classmethod
+    def concat(
+        cls, candidates: Sequence["StructureCandidates"]
+    ) -> "StructureCandidates":
+        return cls(
+            cif_paths=list(
+                itertools.chain.from_iterable([c.cif_paths for c in candidates])
+            ),
+            ranking_data=list(
+                itertools.chain.from_iterable([c.ranking_data for c in candidates])
+            ),
+            msa_coverage_plot_path=candidates[0].msa_coverage_plot_path,
+            pae=torch.cat([c.pae for c in candidates]),
+            pde=torch.cat([c.pde for c in candidates]),
+            plddt=torch.cat([c.plddt for c in candidates]),
+        )
+
 
 def make_all_atom_feature_context(
     fasta_file: Path,
+    *,
     output_dir: Path,
     use_esm_embeddings: bool = True,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
     msa_directory: Path | None = None,
     constraint_path: Path | None = None,
-    template_pdbs: str | None = None,
-    esm_device: torch.device = torch.device("cpu"),
+    use_templates_server: bool = False,
+    templates_path: Path | None = None,
+    esm_device: torch.device = torch.device("xpu"),
 ):
     assert not (
         use_msa_server and msa_directory
     ), "Cannot specify both MSA server and directory"
+    assert not (
+        use_templates_server and templates_path
+    ), "Cannot specify both templates server and path"
 
     # Prepare inputs
     assert fasta_file.exists(), fasta_file
@@ -339,19 +370,25 @@ def make_all_atom_feature_context(
     raise_if_too_many_tokens(n_actual_tokens)
 
     # Generated and/or load MSAs
+    protein_sequences = [
+        chain.entity_data.sequence
+        for chain in chains
+        if chain.entity_data.entity_type == EntityType.PROTEIN
+    ]
     if use_msa_server:
-        protein_sequences = [
-            chain.entity_data.sequence
-            for chain in chains
-            if chain.entity_data.entity_type == EntityType.PROTEIN
-        ]
         msa_dir = output_dir / "msas"
         msa_dir.mkdir(parents=True, exist_ok=False)
         generate_colabfold_msas(
             protein_seqs=protein_sequences,
             msa_dir=msa_dir,
+            search_templates=use_templates_server,
             msa_server_url=msa_server_url,
         )
+        if use_templates_server and protein_sequences:
+            # Override templates path with server path
+            assert templates_path is None
+            templates_path = msa_dir / "all_chain_templates.m8"
+            assert templates_path.is_file()
         msa_context, msa_profile_context = get_msa_contexts(
             chains, msa_directory=msa_dir
         )
@@ -371,65 +408,25 @@ def make_all_atom_feature_context(
         msa_context.num_tokens == merged_context.num_tokens
     ), f"Discrepant tokens in input and MSA: {merged_context.num_tokens} != {msa_context.num_tokens}"
 
-    if template_pdbs=="None":
-        # Load templates
+    # Load templates
+    if templates_path is None:
+        if protein_sequences:
+            assert not use_templates_server, "Server should have written a path"
         template_context = TemplateContext.empty(
             n_tokens=n_actual_tokens,
             n_templates=MAX_NUM_TEMPLATES,
-            )
+        )
     else:
-        if os.path.exists(template_pdbs):
-            print("templates exist")
-        with open(template_pdbs) as f:
-            pdb_str = f.read()
- 
-        #template_context = TemplateContext.empty(
-        #    n_tokens=n_actual_tokens,
-        #    n_templates=1,
-        #    )
+        # NOTE templates m8 file should contain hits with query name matching chain entity_names
+        # or the hash of the chain sequence. When we query the server, we use the hash of the
+        # sequence to identify each hit.
+        template_context = get_template_context(
+            chains=chains,
+            use_sequence_hash_for_lookup=use_templates_server,
+            template_hits_m8=templates_path,
+            template_cif_cache_folder=output_dir / "templates",
+        )
 
-        protein_data = protein.from_pdb_string(pdb_str)
-        pseudo_beta, pseudo_beta_mask = feats.pseudo_beta_fn(
-                                            protein_data.aatype,
-                                            protein_data.atom_positions,
-                                            protein_data.atom_mask,
-                                            )
-        beta_diffs = pseudo_beta.unsqueeze(1) - pseudo_beta.unsqueeze(0)
-        beta_dists = torch.norm(beta_diffs, dim = 2)
-        ca_idx = rc.atom_order["CA"]
-        c_idx = rc.atom_order["C"]
-        n_idx = rc.atom_order["N"]
-        atom_positions_tensor = torch.tensor(protein_data.atom_positions)
-        ca_positions = atom_positions_tensor[..., ca_idx, :]
-        c_positions = atom_positions_tensor[..., c_idx, :]
-        n_positions = atom_positions_tensor[..., n_idx, :]
-        eps=1e-20
-        rigids = rigid_utils.Rigid.make_transform_from_reference(
-                                n_positions,
-                                ca_positions,
-                                c_positions
-                        ) 
-        template_vecs = rigids[..., None].invert_apply(rigids.get_trans())
-        template_unit_vecs = template_vecs/torch.norm(eps+template_vecs,dim=-1,keepdim=True)
-        
-        protein_data_dict = atom37_backbone.atom37_to_frames(protein_data, is_multimer=True)
-        protein_data_dict = atom37_backbone.get_backbone_frames(protein_data_dict)
-
-        temp_restypes = torch.tensor(protein_data.aatype).unsqueeze(0)
-        temp_pseudo_beta_mask = pseudo_beta_mask > 0
-        temp_pseudo_beta_mask = temp_pseudo_beta_mask.unsqueeze(0)
-        temp_atom_mask = torch.tensor(protein_data_dict["backbone_rigid_mask"])
-        temp_atom_mask = temp_atom_mask>0
-        temp_atom_mask = temp_atom_mask.unsqueeze(0)
-
-        temp_dists = beta_dists.unsqueeze(0)
-        temp_unit_vecs = template_unit_vecs.unsqueeze(0)
-        template_context = TemplateContext(temp_restypes,
-                                           temp_pseudo_beta_mask,
-                                           temp_atom_mask,
-                                           temp_dists,
-                                           temp_unit_vecs
-                                           )
     # Load ESM embeddings
     if use_esm_embeddings:
         embedding_context = get_esm_embedding_context(chains, device=esm_device)
@@ -476,7 +473,6 @@ def make_all_atom_feature_context(
     merged_context.drop_glycan_leaving_atoms_inplace()
 
     # Build final feature context
-    #print(template_context)
     feature_context = AllAtomFeatureContext(
         chains=chains,
         structure_context=merged_context,
@@ -486,7 +482,6 @@ def make_all_atom_feature_context(
         embedding_context=embedding_context,
         restraint_context=restraint_context,
     )
-    print(feature_context)
     return feature_context
 
 
@@ -495,25 +490,31 @@ def run_inference(
     fasta_file: Path,
     *,
     output_dir: Path,
+    # Configuration for ESM, MSA, constraints, and templates
     use_esm_embeddings: bool = True,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
     msa_directory: Path | None = None,
     constraint_path: Path | None = None,
-    # expose some params for easy tweaking
+    use_templates_server: bool = False,
+    template_hits_path: Path | None = None,
+    # Parameters controlling how we do inference
+    recycle_msa_subsample: int = 0,
     num_trunk_recycles: int = 3,
     num_diffn_timesteps: int = 200,
     num_diffn_samples: int = 5,
+    num_trunk_samples: int = 1,
     seed: int | None = None,
     device: str | None = None,
     low_memory: bool = True,
 ) -> StructureCandidates:
+    assert num_trunk_samples > 0 and num_diffn_samples > 0
     if output_dir.exists():
         assert not any(
             output_dir.iterdir()
         ), f"Output directory {output_dir} is not empty."
 
-    torch_device = torch.device(device if device is not None else "cuda:0")
+    torch_device = torch.device(device if device is not None else "xpu:0")
 
     feature_context = make_all_atom_feature_context(
         fasta_file=fasta_file,
@@ -523,19 +524,31 @@ def run_inference(
         msa_server_url=msa_server_url,
         msa_directory=msa_directory,
         constraint_path=constraint_path,
+        use_templates_server=use_templates_server,
+        templates_path=template_hits_path,
         esm_device=torch_device,
     )
 
-    return run_folding_on_context(
-        feature_context,
-        output_dir=output_dir,
-        num_trunk_recycles=num_trunk_recycles,
-        num_diffn_timesteps=num_diffn_timesteps,
-        num_diffn_samples=num_diffn_samples,
-        seed=seed,
-        device=torch_device,
-        low_memory=low_memory,
-    )
+    all_candidates: list[StructureCandidates] = []
+    for trunk_idx in range(num_trunk_samples):
+        logging.info(f"Trunk sample {trunk_idx + 1}/{num_trunk_samples}")
+        cand = run_folding_on_context(
+            feature_context,
+            output_dir=(
+                output_dir / f"trunk_{trunk_idx}"
+                if num_trunk_samples > 1
+                else output_dir
+            ),
+            num_trunk_recycles=num_trunk_recycles,
+            num_diffn_timesteps=num_diffn_timesteps,
+            num_diffn_samples=num_diffn_samples,
+            recycle_msa_subsample=recycle_msa_subsample,
+            seed=seed + trunk_idx if seed is not None else None,
+            device=torch_device,
+            low_memory=low_memory,
+        )
+        all_candidates.append(cand)
+    return StructureCandidates.concat(all_candidates)
 
 
 def _bin_centers(min_bin: float, max_bin: float, no_bins: int) -> Tensor:
@@ -545,15 +558,17 @@ def _bin_centers(min_bin: float, max_bin: float, no_bins: int) -> Tensor:
 @torch.no_grad()
 def run_folding_on_context(
     feature_context: AllAtomFeatureContext,
+    *,
     output_dir: Path,
     # expose some params for easy tweaking
+    recycle_msa_subsample: int = 0,
     num_trunk_recycles: int = 3,
     num_diffn_timesteps: int = 200,
     # all diffusion samples come from the same trunk
     num_diffn_samples: int = 5,
     seed: int | None = None,
     device: torch.device | None = None,
-    low_memory: bool=False,
+    low_memory: bool,
 ) -> StructureCandidates:
     """
     Function for in-depth explorations.
@@ -564,10 +579,10 @@ def run_folding_on_context(
         set_seed([seed])
 
     if device is None:
-        device = torch.device("cuda:0")
+        device = torch.device("xpu:0")
 
     # Clear memory
-    torch.cuda.empty_cache()
+    torch.xpu.empty_cache()
 
     ##
     ## Validate inputs
@@ -699,14 +714,28 @@ def run_folding_on_context(
     token_single_trunk_repr = token_single_initial_repr
     token_pair_trunk_repr = token_pair_initial_repr
     for _ in tqdm(range(num_trunk_recycles), desc="Trunk recycles"):
+        subsampled_msa_input_feats, subsampled_msa_mask = None, None
+        if recycle_msa_subsample > 0:
+            subsampled_msa_input_feats, subsampled_msa_mask = (
+                subsample_and_reorder_msa_feats_n_mask(
+                    msa_input_feats,
+                    msa_mask,
+                )
+            )
         (token_single_trunk_repr, token_pair_trunk_repr) = trunk.forward(
             move_to_device=device,
             token_single_trunk_initial_repr=token_single_initial_repr,
             token_pair_trunk_initial_repr=token_pair_initial_repr,
             token_single_trunk_repr=token_single_trunk_repr,  # recycled
             token_pair_trunk_repr=token_pair_trunk_repr,  # recycled
-            msa_input_feats=msa_input_feats,
-            msa_mask=msa_mask,
+            msa_input_feats=(
+                subsampled_msa_input_feats
+                if subsampled_msa_input_feats is not None
+                else msa_input_feats
+            ),
+            msa_mask=(
+                subsampled_msa_mask if subsampled_msa_mask is not None else msa_mask
+            ),
             template_input_feats=template_input_feats,
             template_input_masks=template_input_masks,
             token_single_mask=token_single_mask,
@@ -715,7 +744,7 @@ def run_folding_on_context(
         )
     # We won't be using the trunk anymore; remove it from memory
     del trunk
-    torch.cuda.empty_cache()
+    torch.xpu.empty_cache()
 
     ##
     ## Denoise the trunk representation by passing it through the diffusion module
@@ -819,7 +848,7 @@ def run_folding_on_context(
 
     # We won't be running diffusion anymore
     del diffusion_module, static_diffusion_inputs
-    torch.cuda.empty_cache()
+    torch.xpu.empty_cache()
 
     ##
     ## Run the confidence model

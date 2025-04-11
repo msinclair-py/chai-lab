@@ -5,6 +5,7 @@ import logging
 from collections import Counter, defaultdict
 
 import torch
+import intel_extension_for_pytorch
 from einops import reduce
 from torch import Tensor
 

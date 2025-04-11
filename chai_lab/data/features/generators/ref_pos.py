@@ -3,7 +3,7 @@
 # See the LICENSE file for details.
 
 import torch
-
+import intel_extension_for_pytorch
 from chai_lab.data.features.feature_type import FeatureType
 from chai_lab.data.features.generators.base import EncodingType, FeatureGenerator
 
