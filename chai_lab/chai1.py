@@ -507,6 +507,7 @@ def run_inference(
     seed: int | None = None,
     device: str | None = None,
     low_memory: bool = True,
+    full_data: bool = False,
 ) -> StructureCandidates:
     if output_dir.exists():
         assert not any(
@@ -535,6 +536,7 @@ def run_inference(
         seed=seed,
         device=torch_device,
         low_memory=low_memory,
+        full_data=full_data,
     )
 
 
@@ -554,6 +556,7 @@ def run_folding_on_context(
     seed: int | None = None,
     device: torch.device | None = None,
     low_memory: bool=False,
+    full_data: bool=False,
 ) -> StructureCandidates:
     """
     Function for in-depth explorations.
@@ -975,7 +978,11 @@ def run_folding_on_context(
 
         scores_out_path = output_dir.joinpath(f"scores.model_idx_{idx}.npz")
 
-        np.savez(scores_out_path, **get_scores(ranking_outputs))
+        if full_data:
+            np.savez(scores_out_path, **get_scores(ranking_outputs),
+                     pae=pae_scores[idx], plddt=plddt_scores[idx])
+        else:
+            np.savez(scores_out_path, **get_scores(ranking_outputs))
 
     return StructureCandidates(
         cif_paths=cif_paths,

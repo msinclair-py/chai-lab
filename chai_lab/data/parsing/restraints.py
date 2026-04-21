@@ -11,8 +11,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pandera as pa
-from pandera.typing import Series
 from typing_extensions import assert_never
 
 from chai_lab.utils.typing import typecheck
@@ -24,21 +22,55 @@ class PairwiseInteractionType(Enum):
     POCKET = "pocket"
 
 
-class PairwiseConstraintDataframeModel(pa.DataFrameModel):
-    """Model for constraints table."""
+def validate_pairwise_constraint_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Validate constraints table and return cleaned DataFrame."""
+    required_columns = [
+        'restraint_id', 'chainA', 'res_idxA', 'chainB', 'res_idxB',
+        'max_distance_angstrom', 'min_distance_angstrom', 'connection_type',
+        'confidence', 'comment'
+    ]
 
-    restraint_id: Series[str] = pa.Field(coerce=True, unique=True)
-    chainA: Series[str] = pa.Field(nullable=False, coerce=True)
-    res_idxA: Series[str] = pa.Field(nullable=True, coerce=True)
-    chainB: Series[str] = pa.Field(nullable=False, coerce=True)
-    res_idxB: Series[str] = pa.Field(nullable=True, coerce=True)
-    max_distance_angstrom: Series[float] = pa.Field(nullable=True, ge=0.0)
-    min_distance_angstrom: Series[float] = pa.Field(nullable=True, ge=0.0)
-    connection_type: Series[str] = pa.Field(
-        isin=[i.value for i in PairwiseInteractionType]
-    )
-    confidence: Series[float] = pa.Field(ge=0.0, le=1.0, nullable=True)
-    comment: Series[str] = pa.Field(nullable=True)
+    # Check required columns exist
+    missing_cols = set(required_columns) - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
+    # Validate data types and constraints
+    df = df.copy()
+    df['restraint_id'] = df['restraint_id'].astype(str)
+    df['chainA'] = df['chainA'].astype(str)
+    df['res_idxA'] = df['res_idxA'].astype(str)
+    df['chainB'] = df['chainB'].astype(str)
+    df['res_idxB'] = df['res_idxB'].astype(str)
+
+    # Validate connection_type values
+    valid_types = [t.value for t in PairwiseInteractionType]
+    invalid_types = ~df['connection_type'].isin(valid_types)
+    if invalid_types.any():
+        raise ValueError(f"Invalid connection_type values: {df.loc[invalid_types, 'connection_type'].unique()}")
+
+    # Validate distance constraints
+    if 'max_distance_angstrom' in df.columns:
+        valid_max = df['max_distance_angstrom'].isna() | (df['max_distance_angstrom'] >= 0)
+        if not valid_max.all():
+            raise ValueError("max_distance_angstrom must be >= 0")
+
+    if 'min_distance_angstrom' in df.columns:
+        valid_min = df['min_distance_angstrom'].isna() | (df['min_distance_angstrom'] >= 0)
+        if not valid_min.all():
+            raise ValueError("min_distance_angstrom must be >= 0")
+
+    # Validate confidence values
+    if 'confidence' in df.columns:
+        valid_conf = df['confidence'].isna() | ((df['confidence'] >= 0) & (df['confidence'] <= 1))
+        if not valid_conf.all():
+            raise ValueError("confidence must be between 0 and 1")
+
+    # Check uniqueness of restraint_id
+    if df['restraint_id'].duplicated().any():
+        raise ValueError("restraint_id values must be unique")
+
+    return df
 
 
 @typecheck
@@ -174,7 +206,7 @@ def parse_pairwise_table(table: str | Path) -> list[PairwiseInteraction]:
     """Parse a table of pairwise interactions."""
     df = pd.read_csv(table)
 
-    PairwiseConstraintDataframeModel.validate(df, inplace=True)
+    df = validate_pairwise_constraint_dataframe(df)
 
     # We only have floats and strings; this applies to strings
     df.update(df.select_dtypes(include=["object"]).fillna(""))

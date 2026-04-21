@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import Literal, Mapping, Optional
 
 import pandas as pd
-import pandera as pa
 import torch
 from einops import repeat
-from pandera.typing import Series
 
 from chai_lab.data.dataset.msas.msa_context import NO_PAIRING_KEY, MSAContext
 from chai_lab.data.parsing.fasta import read_fasta
@@ -34,13 +32,28 @@ RECOGNIZED_SOURCES: set[str] = {
 }
 
 
-class AlignedParquetModel(pa.DataFrameModel):
-    """Model for aligned parquet files."""
+def validate_aligned_parquet_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Validate aligned parquet files schema and return cleaned DataFrame."""
+    required_columns = ['sequence', 'source_database', 'pairing_key', 'comment']
 
-    sequence: Series[str]
-    source_database: Series[str] = pa.Field(isin=RECOGNIZED_SOURCES)
-    pairing_key: Series[str]
-    comment: Series[str]
+    # Check required columns exist
+    missing_cols = set(required_columns) - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
+    # Validate data types
+    df = df.copy()
+    df['sequence'] = df['sequence'].astype(str)
+    df['source_database'] = df['source_database'].astype(str)
+    df['pairing_key'] = df['pairing_key'].astype(str)
+    df['comment'] = df['comment'].astype(str)
+
+    # Validate source_database values
+    invalid_sources = ~df['source_database'].isin(RECOGNIZED_SOURCES)
+    if invalid_sources.any():
+        raise ValueError(f"Invalid source_database values: {df.loc[invalid_sources, 'source_database'].unique()}")
+
+    return df
 
 
 def hash_sequence(seq: str) -> str:
@@ -65,14 +78,13 @@ def parse_aligned_pqt_to_msa_context(
     quota_sizes: dict[MSADataSource, int] | None = msa_dataset_source_to_quota,
 ) -> MSAContext:
     """
-    Parse .aligned.pqt files, following the schema defined in AlignedParquetModel.
+    Parse .aligned.pqt files, following the schema validated by validate_aligned_parquet_dataframe.
     If apply_quota is specified, then apply per-source quota limits.
     """
     raw_table = pd.read_parquet(aligned_pqt_path)
     try:
-        # inplace coerces types in place
-        AlignedParquetModel.validate(raw_table, inplace=True)
-    except pa.errors.SchemaError as e:
+        raw_table = validate_aligned_parquet_dataframe(raw_table)
+    except ValueError as e:
         raise ValueError(f"Invalid schema: {e}")
 
     # Exactly one query row
@@ -165,7 +177,7 @@ def a3m_to_aligned_dataframe(
         records.append(record)
     assert records[0]["source_database"] == "query"
     retval = pd.DataFrame.from_records(records)
-    AlignedParquetModel.validate(retval)
+    retval = validate_aligned_parquet_dataframe(retval)
     return retval
 
 
