@@ -4,6 +4,7 @@
 
 
 import torch
+import intel_extension_for_pytorch
 from einops import rearrange
 from torch import Tensor
 

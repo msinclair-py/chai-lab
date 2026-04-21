@@ -5,6 +5,7 @@
 from functools import lru_cache
 
 import torch
+import intel_extension_for_pytorch
 from torch import Tensor
 
 import chai_lab.data.residue_constants as rc

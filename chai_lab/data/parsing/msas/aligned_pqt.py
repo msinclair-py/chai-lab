@@ -13,6 +13,7 @@ from typing import Literal, Mapping, Optional
 
 import pandas as pd
 import torch
+import intel_extension_for_pytorch
 from einops import repeat
 
 from chai_lab.data.dataset.msas.msa_context import NO_PAIRING_KEY, MSAContext
@@ -36,19 +37,16 @@ def validate_aligned_parquet_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Validate aligned parquet files schema and return cleaned DataFrame."""
     required_columns = ['sequence', 'source_database', 'pairing_key', 'comment']
 
-    # Check required columns exist
     missing_cols = set(required_columns) - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # Validate data types
     df = df.copy()
     df['sequence'] = df['sequence'].astype(str)
     df['source_database'] = df['source_database'].astype(str)
     df['pairing_key'] = df['pairing_key'].astype(str)
     df['comment'] = df['comment'].astype(str)
 
-    # Validate source_database values
     invalid_sources = ~df['source_database'].isin(RECOGNIZED_SOURCES)
     if invalid_sources.any():
         raise ValueError(f"Invalid source_database values: {df.loc[invalid_sources, 'source_database'].unique()}")

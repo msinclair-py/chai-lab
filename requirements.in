@@ -1,5 +1,5 @@
 # dev-deps, still placed in the same requirements file
-ruff
+ruff # in sync with pre-commit-hook
 mypy
 pytest
 pre-commit
@@ -25,12 +25,20 @@ tqdm
 
 # data import/export, application-specific
 gemmi       # pdb/mmcif parsing
+rdkit    # parsing of ligands. 2023.9.6 has broken type stubs
 biopython>=1.83    # parsing, data access
 antipickle  # save/load heterogeneous python structures
 tmtools>=0.0.3     # Python bindings for the TM-align algorithm
 modelcif>=1.0      # mmcif writing, confirmed to work currently latest 1.0
 
+# commented out following optional dependencies for release on pypi
+# dockq metric for comparing predicted pdbs and ground truth pdbs
+# dockq @ git+https://github.com/bjornwallner/DockQ.git@v2.1.1
+# pip-compatible minimized version of anarci
+# anarci @ git+https://github.com/arogozhnikov/microANARCI@d81823395d0c3532d6e033d80b036b4aa4a4565e
+
 # computing, dl
+numpy
 pandas[parquet,gcp,aws] 
 # pandera removed - using simple pandas validation instead
 numba>=0.59
@@ -38,3 +46,4 @@ numba>=0.59
 einops
 jaxtyping>=0.2.25   # versions <0.2.25 do not easily support runtime typechecking
 beartype>=0.18      # compatible typechecker to use with jaxtyping
+# do not use 2.2 because https://github.com/pytorch/pytorch/issues/122385

@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 import torch
+import intel_extension_for_pytorch
 from torch import Tensor
 
 from chai_lab.data.features.feature_type import FeatureType

@@ -6,6 +6,7 @@ import logging
 from dataclasses import asdict, dataclass
 
 from torch import Tensor
+import intel_extension_for_pytorch
 from typing_extensions import assert_never
 
 from chai_lab.data import residue_constants as rc

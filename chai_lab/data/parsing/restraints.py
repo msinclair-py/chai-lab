@@ -30,12 +30,10 @@ def validate_pairwise_constraint_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         'confidence', 'comment'
     ]
 
-    # Check required columns exist
     missing_cols = set(required_columns) - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # Validate data types and constraints
     df = df.copy()
     df['restraint_id'] = df['restraint_id'].astype(str)
     df['chainA'] = df['chainA'].astype(str)
@@ -43,13 +41,11 @@ def validate_pairwise_constraint_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df['chainB'] = df['chainB'].astype(str)
     df['res_idxB'] = df['res_idxB'].astype(str)
 
-    # Validate connection_type values
     valid_types = [t.value for t in PairwiseInteractionType]
     invalid_types = ~df['connection_type'].isin(valid_types)
     if invalid_types.any():
         raise ValueError(f"Invalid connection_type values: {df.loc[invalid_types, 'connection_type'].unique()}")
 
-    # Validate distance constraints
     if 'max_distance_angstrom' in df.columns:
         valid_max = df['max_distance_angstrom'].isna() | (df['max_distance_angstrom'] >= 0)
         if not valid_max.all():
@@ -60,13 +56,11 @@ def validate_pairwise_constraint_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         if not valid_min.all():
             raise ValueError("min_distance_angstrom must be >= 0")
 
-    # Validate confidence values
     if 'confidence' in df.columns:
         valid_conf = df['confidence'].isna() | ((df['confidence'] >= 0) & (df['confidence'] <= 1))
         if not valid_conf.all():
             raise ValueError("confidence must be between 0 and 1")
 
-    # Check uniqueness of restraint_id
     if df['restraint_id'].duplicated().any():
         raise ValueError("restraint_id values must be unique")
 

@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 import torch
+import intel_extension_for_pytorch
 
 from chai_lab.data.dataset.msas.msa_context import MSAContext
 from chai_lab.data.dataset.msas.preprocess import (

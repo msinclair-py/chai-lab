@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 
 import torch
+import intel_extension_for_pytorch
 from einops import rearrange, reduce, repeat
 from torch import Tensor
 
